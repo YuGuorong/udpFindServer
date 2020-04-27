@@ -1,23 +1,30 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"strings"
+	"sync"
 )
 
 const DISCVR_SRV_PORT = 9981
 
-var ipList []net.IP
+type UdpIP struct {
+	ipHost net.IP
+	brCast net.IP
+}
 
-func queryIpList() {
+var wg sync.WaitGroup
+
+func lookupNetInfs() {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	ipList = make([]net.IP, 0)
+	ipList := make([]UdpIP, 0)
 	for idxInf, address := range addrs {
 		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
 			if ip4 := ipnet.IP.To4(); ip4 != nil {
@@ -25,57 +32,98 @@ func queryIpList() {
 				if err != nil || strings.Contains(inf.Name, "lxcbr") || strings.Contains(inf.Name, "docker") {
 					continue
 				}
-				ipList = append(ipList, ip4)
-				fmt.Println(ip4)
+				bcastip := net.IP{ip4[0], ip4[1], ip4[2], ip4[3]}
 				for i := 0; i < 4; i++ {
-					ip4[i] = (ipnet.Mask[i] ^ 0xFF) | ip4[i]
+					bcastip[i] = (ipnet.Mask[i] ^ 0xFF) | bcastip[i]
 				}
-				fmt.Println("Broadcast:", ip4)
-				fmt.Println("IP：", ipnet.IP.String())
-				go udpSvr(ipnet.IP, ip4)
+				ipList = append(ipList, UdpIP{ip4, bcastip})
+				//fmt.Println(ip4)
+				//fmt.Println(bcastip)
 			}
 		}
 	}
-
+	udpSvr(ipList)
 }
 
-func udpSvr(hostip net.IP, bcastIP net.IP) {
-	fmt.Println("new solution")
-	//address := "192.168.3.255" + ":" + "9981"
-	addr := &net.UDPAddr{IP: bcastIP, Port: 9981}
-	conn, err := net.ListenUDP("udp", addr)
+func runSvr(ctx context.Context, uip UdpIP) {
+	defer func() {
+		fmt.Println("proc:", uip.ipHost.String, " Exit!")
+		wg.Done()
+	}()
+
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: uip.brCast, Port: DISCVR_SRV_PORT})
 	if err != nil {
 		fmt.Println(err)
-		os.Exit(1)
+		return
 	}
 
-	defer conn.Close()
-
+	fmt.Println("Starting listening at :", uip.brCast.String())
 	for {
-		// Here must use make and give the lenth of buffer
-		data := make([]byte, 256)
-		nrr, rAddr, err := conn.ReadFromUDP(data)
-		if err != nil {
-			fmt.Println(err)
-			continue
+		select {
+		case <-ctx.Done():
+			conn.Close()
+			return
+		default:
+			// Here must use make and give the lenth of buffer
+			data := make([]byte, 256)
+			nrr, rAddr, err := conn.ReadFromUDP(data)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+
+			strData := string(data[0:nrr])
+			fmt.Println(strData)
+			if strings.Compare(strData, "GW_GETIP") != 0 {
+				continue
+			}
+
+			upper := fmt.Sprintf("%s", uip.ipHost.String())
+			n, err := conn.WriteToUDP([]byte(upper), rAddr)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+
+			fmt.Println("Send:[", n, "]:", upper)
 		}
 
-		fmt.Println(nrr)
-		strData := string(data[0:nrr])
-		fmt.Println("Received:", strData)
-		fmt.Println(rAddr)
-
-		upper := "R-" + strData
-		n, err := conn.WriteToUDP([]byte(upper), rAddr)
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-
-		fmt.Println("Send:[", n, "]:", upper)
 	}
+}
+
+func freeUdpSvr(uip UdpIP) {
+	srcAddr := &net.UDPAddr{IP: uip.ipHost, Port: 0}
+	dstAddr := &net.UDPAddr{IP: uip.brCast, Port: DISCVR_SRV_PORT}
+	conn, err := net.ListenUDP("udp", srcAddr)
+	if err != nil {
+		fmt.Println(err)
+	}
+	_, err = conn.WriteToUDP([]byte("exit Read"), dstAddr)
+	conn.Close()
+}
+
+func udpSvr(ipList []UdpIP) {
+	fmt.Println("starting service...")
+
+	ctx := context.Background()
+	ctxWithCancel, cancelFunction := context.WithCancel(ctx)
+
+	for _, uip := range ipList {
+		wg.Add(1)
+		go runSvr(ctxWithCancel, uip)
+	}
+
+	var wait string
+	fmt.Scanln(&wait)
+	fmt.Println("Waiting process exit...")
+	cancelFunction()
+	for _, uip := range ipList {
+		freeUdpSvr(uip)
+	}
+
+	wg.Wait()
 }
 
 func main() {
-	queryIpList()
+	lookupNetInfs()
 }
