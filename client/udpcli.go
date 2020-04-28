@@ -17,6 +17,7 @@ type UdpIP struct {
 }
 
 var wg sync.WaitGroup
+var szCmd = "GW_NETINFO"
 
 func lookupNetInfs() {
 	addrs, err := net.InterfaceAddrs()
@@ -60,7 +61,7 @@ func udpPing(uip UdpIP) {
 	if err != nil {
 		fmt.Println(err)
 	}
-	n, err := conn.WriteToUDP([]byte("GW_GETIP"), dstAddr)
+	n, err := conn.WriteToUDP([]byte(szCmd), dstAddr)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -77,12 +78,16 @@ func udpPing(uip UdpIP) {
 			}
 			fmt.Println(err)
 		}
-		fmt.Printf("Find server at [%s]\n", data[:n])
+		fmt.Printf("Find server at %s\n", data[:n])
 	}
 	conn.Close()
 }
 
 func main() {
+	if len(os.Args) > 1 && strings.Compare(os.Args[1], "ip") == 0 {
+		szCmd = "GW_GETIP"
+	}
+
 	lookupNetInfs()
 	wg.Wait()
 }

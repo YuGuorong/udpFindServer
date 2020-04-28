@@ -17,26 +17,39 @@ type UdpIP struct {
 }
 
 var wg sync.WaitGroup
+var ipList []UdpIP
+var sInfInfo string
 
 func lookupNetInfs() {
+	sInfInfo = ""
+	infs, err := net.Interfaces()
+	for _, ninf := range infs {
+		if ninf.HardwareAddr != nil &&
+			!strings.Contains(ninf.Name, "lxcbr") && !strings.Contains(ninf.Name, "docker") {
+			sInfInfo += fmt.Sprintf("\n  [%12s | ", ninf.Name)
+			sInfInfo += ninf.HardwareAddr.String() + "]"
+		}
+	}
+
+	sInfInfo += " \n"
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	ipList := make([]UdpIP, 0)
+	ipList = make([]UdpIP, 0)
 	for idxInf, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+		if ipnet, ok := address.(*net.IPNet); ok {
 			if ip4 := ipnet.IP.To4(); ip4 != nil {
-				inf, err := net.InterfaceByIndex(idxInf)
-				if err != nil || strings.Contains(inf.Name, "lxcbr") || strings.Contains(inf.Name, "docker") {
+				inf, err := net.InterfaceByIndex(idxInf + 1)
+				if err != nil || ipnet.IP.IsLoopback() || strings.Contains(inf.Name, "lxcbr") || strings.Contains(inf.Name, "docker") {
 					continue
 				}
 				bcastip := net.IP{ip4[0], ip4[1], ip4[2], ip4[3]}
 				for i := 0; i < 4; i++ {
 					bcastip[i] = (ipnet.Mask[i] ^ 0xFF) | bcastip[i]
 				}
-				ipList = append(ipList, UdpIP{ip4, bcastip})
+				ipList = append(ipList, UdpIP{ipHost: ip4, brCast: bcastip})
 				//fmt.Println(ip4)
 				//fmt.Println(bcastip)
 			}
@@ -64,7 +77,7 @@ func runSvr(ctx context.Context, uip UdpIP) {
 			conn.Close()
 			return
 		default:
-			// Here must use make and give the lenth of buffer
+			cmd := 0
 			data := make([]byte, 256)
 			nrr, rAddr, err := conn.ReadFromUDP(data)
 			if err != nil {
@@ -74,11 +87,25 @@ func runSvr(ctx context.Context, uip UdpIP) {
 
 			strData := string(data[0:nrr])
 			fmt.Println(strData)
-			if strings.Compare(strData, "GW_GETIP") != 0 {
+			if strings.Compare(strData, "GW_GETIP") == 0 {
+				cmd = 1
+			} else if strings.Compare(strData, "GW_NETINFO") == 0 {
+				cmd = 2
+			} else {
 				continue
 			}
 
 			upper := fmt.Sprintf("%s", uip.ipHost.String())
+			if cmd == 2 {
+				upper += "{"
+				for i, uip := range ipList {
+					if i != 0 {
+						upper += "; "
+					}
+					upper = upper + fmt.Sprintf("%s", uip.ipHost.String())
+				}
+				upper += " } | " + sInfInfo
+			}
 			n, err := conn.WriteToUDP([]byte(upper), rAddr)
 			if err != nil {
 				fmt.Println(err)
